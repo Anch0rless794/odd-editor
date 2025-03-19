@@ -1,115 +1,279 @@
 <template>
   <div class="odd-editing">
-    <div ref="editingRef" class="odd-editing-area" contenteditable="true" @input="onInput"></div>
-    <div class="odd-placeholder" v-show="showPlaceholder">Type Here...</div>
+    <div ref="editingRef" class="odd-editing-area" contenteditable="true" @beforeinput="onBeforeInput"></div>
+    <!--    <div class="odd-placeholder" v-show="showPlaceholder">Type Here...</div>-->
   </div>
 </template>
 
 <script>
-import emitter from "packages/utils/emitter";
 
 export default {
   name: "OddEditing",
   data() {
     return {
       showPlaceholder: true,
+      history: [],
+      historyIndex: -1,
     };
   },
   methods: {
     getRef() {
       return this.$refs.editingRef;
     },
-    onInput() {
-      const $el = this.getRef();
-      this.showPlaceholder = ($el.innerText.trim() === '');
+    /**
+     * @description 使用 p 标签包裹内容,确保 editor 不会为空
+     * */
+    ensureEditorNotEmpty() {
+      const $el = this.getRef()
+      if (!$el.innerHTML.trim()) {
+        const paragraph = document.createElement("p");
+        paragraph.append(document.createElement("br"))
+        $el.append(paragraph)
+      }
     },
-    applyFormat({type, value}) {
-      const selection = window.getSelection();
-      const range = selection.rangeCount ? selection.getRangeAt(0) : null;
+    /**
+     * @description 移动光标到指定位置
+     * */
+    moveRange(range, element, offset) {
+      range.setStart(element, offset);
+      range.setEnd(element, offset);
+      window.getSelection().removeAllRanges();
+      window.getSelection().addRange(range);
+    },
+    /**
+     * @description 处理文本输入
+     *
+     * @param {Range} range
+     * @param {String} data
+     * */
+    insertText(range, data) {
+      const {startContainer, startOffset} = range
+      const paragraph = startContainer.nodeType === Node.TEXT_NODE ? startContainer.parentNode : startContainer;
 
-      if (range && !range.collapsed) {
-        // **选中情况：直接应用格式**
-        const span = document.createElement('span');
-        this.updateStyle(span, type, value);
-        span.appendChild(range.extractContents());
-        range.insertNode(span);
-        selection.removeAllRanges();
-        range.selectNodeContents(span);
-        range.collapse(false); // **光标移动到新内容之后**
-        selection.addRange(range);
+      if (!paragraph.textContent) {
+        paragraph.append(document.createTextNode(""));
+      }
+
+      const textContent = paragraph.textContent;
+      paragraph.textContent = textContent.slice(0, startOffset) + data + textContent.slice(startOffset);
+
+      this.moveRange(range, paragraph.firstChild, startOffset + data.length)
+    },
+    /**
+     * @description 插入新行
+     *
+     * @param {Range} range
+     * */
+    insertParagraph(range) {
+      const {startContainer, startOffset} = range
+      const paragraph = startContainer.nodeType === Node.TEXT_NODE ? startContainer.parentNode : startContainer;
+
+      if (!paragraph || paragraph === this.getRef()) return;
+
+      const newParagraph = paragraph.cloneNode(false);
+      const text = paragraph.textContent;
+      const beforeText = text.slice(0, startOffset);
+      const afterText = text.slice(startOffset);
+
+      if (beforeText) {
+        paragraph.textContent = beforeText;
       } else {
-        // **未选中文本：更新 activeStyle，并插入样式 span**
-        const editor = this.$refs.editingRef;
-        const span = document.createElement('span');
-        this.updateStyle(span, null, null); // 应用 activeStyle
-        span.innerHTML = '&#8203;'; // **插入零宽空格，防止 span 消失**
+        paragraph.replaceChildren(document.createElement("br"))
+        // paragraph.innerHTML = "<br />";
+      }
 
-        // **特殊情况处理：如果 `editor` 为空**
-        if (editor.childNodes.length === 0) {
-          editor.appendChild(span);
-        } else {
-          // **正常情况：在当前光标位置插入 span**
-          const newRange = document.createRange();
-          newRange.setStartAfter(editor.lastChild);
-          newRange.setEndAfter(editor.lastChild);
-          newRange.insertNode(span);
+      if (afterText) {
+        newParagraph.textContent = afterText;
+      } else {
+        newParagraph.append(document.createElement("br"));
+      }
+
+      paragraph.after(newParagraph);
+
+      this.moveRange(range, newParagraph, 0);
+    },
+    /**
+     * @description
+     *
+     * @param {Range} range
+     * */
+    deleteContent(range) {
+      // TODO: 光标在行首时，删除则合并行，并移动光标位置
+      if (range.collapsed) {
+        range.setStart(range.startContainer, Math.max(0, range.startOffset - 1));
+        range.deleteContents();
+
+        const {startContainer, startOffset} = range
+
+        const paragraph = startContainer.nodeType === Node.TEXT_NODE ? startContainer.parentNode : startContainer;
+
+        if (paragraph) {
+
+
+          if (this.isBrParagraph(paragraph)) {
+            const prevParagraph = paragraph.previousElementSibling
+            if (prevParagraph) {
+              const lastNode = prevParagraph.lastChild
+              if (lastNode?.nodeType === Node.TEXT_NODE) {
+                range.setStart(lastNode, lastNode.textContent.length);
+                this.moveRange(range, lastNode, lastNode.textContent.length);
+              } else if (lastNode?.tagName === "BR") {
+                range.setStartBefore(lastNode)
+              }
+              paragraph.remove();
+            }
+          }
+
+
+          if (this.isEmptyParagraph(paragraph)) {
+            paragraph.append(document.createElement("br"))
+            this.moveRange(range, paragraph, 0)
+          }
+
+          if (startOffset === 0) { // 光标在行首
+            const prevParagraph = paragraph.previousElementSibling
+            if (prevParagraph) {
+              const lastNode = prevParagraph.lastChild;
+
+              while (paragraph.firstChild) {
+                prevParagraph.append(paragraph.firstChild)
+              }
+
+              paragraph.remove();
+              this.setCaretToEnd(lastNode || prevParagraph);
+            }
+          }
+
         }
-        // **确保光标进入 span 内部的最后**
-        const newSelection = window.getSelection();
-        const newRange = document.createRange();
-        newRange.selectNodeContents(span);
-        newRange.collapse(false); // **将光标放在 span 内部末尾**
-        newSelection.removeAllRanges();
-        newSelection.addRange(newRange);
+      } else {
+        range.deleteContents();
+        const $el = this.getRef();
+        // 可能时全选或者部分选中
+        const {startContainer, endContainer, startOffset, endOffset} = range;
+        let startBlock, endBlock
+
+        if (startContainer === $el) {
+          startBlock = $el.children[Math.min(startOffset, endOffset - 1)];
+        }
+
+        if (endContainer === $el) {
+          endBlock = $el.children[Math.max(startOffset, endOffset - 1)];
+        }
+
+        if (startBlock && endBlock && startBlock !== endBlock) {
+          const startBlockOffset = startBlock.textContent.length;
+          range.deleteContents(); // 删除选区
+
+          while (endBlock.firstChild) {
+            startBlock.appendChild(endBlock.firstChild);
+          }
+
+          endBlock.remove();
+
+          this.setCaretToPosition(startBlock, startBlockOffset)
+        }
+        const children = Array.from($el.children)
+        const emptyChildren = children.filter(this.isEmptyParagraph);
+
+        if (emptyChildren.length === children.length) {
+          const paragraph = document.createElement("p");
+          paragraph.append(document.createElement("br"))
+          $el.replaceChildren(paragraph)
+          this.moveRange(range, paragraph, 0);
+        }
       }
     },
-    applyActiveStyle() {
-      const editor = this.$refs.editingRef;
-      const lastNode = editor.lastChild;
-
-      if (lastNode && lastNode.nodeType === Node.TEXT_NODE) {
-        // 创建一个 span 包裹最后输入的文字，并应用 activeStyle
-        const span = document.createElement('span');
-        this.updateStyle(span, null, null);
-        span.textContent = lastNode.textContent;
-        editor.replaceChild(span, lastNode);
-
-        // **确保光标在新插入的 span 内部的末尾**
-        const selection = window.getSelection();
-        const range = document.createRange();
-        range.selectNodeContents(span);
-        range.collapse(false); // **光标放到 span 内部最后**
-        selection.removeAllRanges();
-        selection.addRange(range);
-      }
+    isEmptyParagraph(paragraph) {
+      return (!paragraph.textContent.trim() && paragraph.children.length === 0)
     },
-    updateStyle(element, type, value) {
-      if (type === 'bold') {
-        element.style.fontWeight = 'bold';
-        this.activeStyle.fontWeight = 'bold';
-      } else if (type === 'italic') {
-        element.style.fontStyle = 'italic';
-        this.activeStyle.fontStyle = 'italic';
-      } else if (type === 'underline') {
-        element.style.textDecoration = 'underline';
-        this.activeStyle.textDecoration = 'underline';
-      } else if (type === 'color') {
-        element.style.color = value;
-        this.activeStyle.color = value;
+    isBrParagraph(paragraph) {
+      return paragraph.children.length === 1 && paragraph.children[0].tagName === "BR"
+    },
+    setCaretToPosition(element, offset) {
+      const range = document.createRange();
+      const selection = window.getSelection();
+
+      let node = element.firstChild;
+      let charCount = 0;
+
+      // **遍历子节点，找到正确的偏移点**
+      while (node) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          if (charCount + node.length >= offset) {
+            range.setStart(node, offset - charCount);
+            break;
+          }
+          charCount += node.length;
+        }
+        node = node.nextSibling;
       }
 
-      // **应用已有的 activeStyle**
-      Object.assign(element.style, this.activeStyle);
+      if (!node) {
+        // **如果 element 为空，插入 <br> 并选中**
+        const br = document.createElement("br");
+        element.appendChild(br);
+        range.setStart(element, 0);
+      }
+
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    },
+    setCaretToEnd(element, prevRange = null) {
+      const range = document.createRange();
+      const selection = window.getSelection();
+
+      let node = element;
+      while (node && node.lastChild) {
+        node = node.lastChild;
+      }
+
+      if (node.nodeType === Node.TEXT_NODE) {
+        range.setStart(node, node.textContent.length);
+      } else {
+        range.setStart(element, element.childNodes.length);
+      }
+
+      // **光标重置**
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    },
+    onBeforeInput(e) {
+      e.preventDefault();
+      const {inputType, data} = e
+      const selection = window.getSelection()
+      if (!selection.rangeCount) return
+
+      const range = selection.getRangeAt(0)
+
+      switch (inputType) {
+        case "insertText":
+          this.insertText(range, data);
+          break;
+        case "insertParagraph":
+          this.insertParagraph(range)
+          break;
+        case "deleteContentBackward":
+          this.deleteContent(range)
+          break;
+      }
     }
   },
   mounted() {
-    emitter.on('format', this.applyFormat);
-    this.getRef().innerHTML = ''
+    this.ensureEditorNotEmpty()
   }
 };
 </script>
 
+<style>
+p {
+  margin: 0;
+}
+</style>
+
 <style scoped lang="less">
+
 .odd-editing {
   --p: 5px;
   --border-color: #e1e3e5;
